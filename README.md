@@ -1,7 +1,5 @@
 # ZenANN: Vector Similarity Search Library (Naive Baseline Implementation)
 
-[![License](https://img.shields.io/github/license/5000user5000/zenann)](https://github.com/5000user5000/zenann/blob/main/LICENSE)
-
 ## Basic Information
 
 **ZenANN** is a straightforward implementation of approximate nearest neighbor (ANN) similarity search library for Python developers. This is a **naive baseline version** that provides multiple indexing methods, such as **IVF** (Inverted File Index), **HNSW** (Hierarchical Navigable Small World), and **KD-Tree** for exact search.
@@ -147,8 +145,8 @@ loaded_index = zenann.IVFFlatIndex.read_index("my_index.bin")
 
 ```bash
 # 1. Clone repository with submodules
-git clone --recursive https://github.com/5000user5000/zenann.git
-cd zenann
+git clone --recursive https://github.com/5000user5000/ZenANN.git
+cd ZenANN
 
 # 2. Build Faiss dependency
 cd extern/faiss
