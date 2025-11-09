@@ -51,7 +51,7 @@ SearchResult IVFFlatIndex::search(const Vector& query, size_t k) const {
     // Calculate distance from query to all centroids (parallelized)
     #pragma omp parallel for schedule(static)
     for (size_t c = 0; c < nlist_; ++c) {
-        float d = l2_naive(query.data(), centroids_[c].data(), dimension_);
+        float d = l2_simd(query.data(), centroids_[c].data(), dimension_);
         cdist[c] = {d, c};
     }
 
@@ -77,7 +77,7 @@ SearchResult IVFFlatIndex::search(const Vector& query, size_t k) const {
 
         // Search within this cluster's inverted list
         for (size_t id : lists_[c]) {
-            float dist = l2_naive(query.data(), data[id].data(), dimension_);
+            float dist = l2_simd(query.data(), data[id].data(), dimension_);
 
             if (local.size() < k) {
                 local.emplace_back(dist, id);
