@@ -1,6 +1,8 @@
 #include "IVFFlatIndex.h"
 #include "SimdUtils.h"
+#ifdef ENABLE_OPENMP
 #include <omp.h>
+#endif
 #include <limits>
 #include <random>
 #include <algorithm>
@@ -48,10 +50,12 @@ SearchResult IVFFlatIndex::search(const Vector& query, size_t k) const {
     std::vector<Pair> cdist(nlist_);
     std::vector<Pair> heap;
 
-    // Calculate distance from query to all centroids (parallelized)
+    // Calculate distance from query to all centroids
+#ifdef ENABLE_OPENMP
     #pragma omp parallel for schedule(static)
+#endif
     for (size_t c = 0; c < nlist_; ++c) {
-        float d = l2_simd(query.data(), centroids_[c].data(), dimension_);
+        float d = l2_distance(query.data(), centroids_[c].data(), dimension_);
         cdist[c] = {d, c};
     }
 
@@ -62,23 +66,27 @@ SearchResult IVFFlatIndex::search(const Vector& query, size_t k) const {
         }
     );
 
-    // Probe nprobe nearest lists in parallel
-    // Each thread maintains a local heap, then merges into global heap
+    // Probe nprobe nearest lists
     heap.reserve(k);
     const auto& data = datastore_->getAll();
 
+#ifdef ENABLE_OPENMP
     #pragma omp parallel for schedule(dynamic)
+#endif
     for (size_t pi = 0; pi < nprobe_; ++pi) {
         size_t c = cdist[pi].second;
 
+#ifdef ENABLE_OPENMP
         // Thread-local heap for this cluster
         std::vector<Pair> local;
         local.reserve(k);
+#endif
 
         // Search within this cluster's inverted list
         for (size_t id : lists_[c]) {
-            float dist = l2_simd(query.data(), data[id].data(), dimension_);
+            float dist = l2_distance(query.data(), data[id].data(), dimension_);
 
+#ifdef ENABLE_OPENMP
             if (local.size() < k) {
                 local.emplace_back(dist, id);
                 if (local.size() == k) {
@@ -89,8 +97,21 @@ SearchResult IVFFlatIndex::search(const Vector& query, size_t k) const {
                 local.back() = {dist, id};
                 std::push_heap(local.begin(), local.end());
             }
+#else
+            if (heap.size() < k) {
+                heap.emplace_back(dist, id);
+                if (heap.size() == k) {
+                    std::make_heap(heap.begin(), heap.end());
+                }
+            } else if (dist < heap.front().first) {
+                std::pop_heap(heap.begin(), heap.end());
+                heap.back() = {dist, id};
+                std::push_heap(heap.begin(), heap.end());
+            }
+#endif
         }
 
+#ifdef ENABLE_OPENMP
         // Merge local results into global heap (thread-safe)
         #pragma omp critical
         {
@@ -107,6 +128,7 @@ SearchResult IVFFlatIndex::search(const Vector& query, size_t k) const {
                 }
             }
         }
+#endif
     }
 
     std::sort(heap.begin(), heap.end(),
@@ -134,8 +156,10 @@ std::vector<SearchResult> IVFFlatIndex::search_batch(const Dataset& queries, siz
     const size_t nq = queries.size();
     std::vector<SearchResult> results(nq);
 
-    // Parallel batch search with dynamic scheduling
+    // Batch search with optional parallelization
+#ifdef ENABLE_OPENMP
     #pragma omp parallel for schedule(dynamic)
+#endif
     for (size_t i = 0; i < nq; ++i) {
         results[i] = search(queries[i], k);
     }
