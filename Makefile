@@ -1,5 +1,5 @@
 CXX := g++
-CXXFLAGS := -std=c++17 -O3 -fPIC -fopenmp
+CXXFLAGS := -std=c++17 -O3 -fPIC -march=native -fopenmp
 
 # Python / pybind11 include flags
 PYBIND11_INCLUDES := $(shell python3 -m pybind11 --includes)
