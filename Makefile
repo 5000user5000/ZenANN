@@ -1,5 +1,5 @@
 CXX := g++
-CXXFLAGS := -std=c++17 -O3 -fPIC -march=native -fopenmp
+BASE_CXXFLAGS := -std=c++17 -O3 -fPIC
 
 # Python / pybind11 include flags
 PYBIND11_INCLUDES := $(shell python3 -m pybind11 --includes)
@@ -28,35 +28,116 @@ SOURCES := \
 
 # Extension suffix (.so or .cpython-XYm-x86_64-linux-gnu.so, etc.)
 EXT_SUFFIX := $(shell python3-config --extension-suffix)
-TARGET := build/zenann$(EXT_SUFFIX)
 
 # Platform‐specific linker flags
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)
     # on macOS use dynamic_lookup
-    LDFLAGS := -undefined dynamic_lookup
+    BASE_LDFLAGS := -undefined dynamic_lookup
 else
     # on Linux embed rpath to pick up our extern/faiss libfaiss.so
-    LDFLAGS := -Wl,-rpath,$$ORIGIN/../extern/faiss/build/install/lib
+    BASE_LDFLAGS := -Wl,-rpath,$$ORIGIN/../extern/faiss/build/install/lib
 endif
 
-# Add OpenMP linking
-LDFLAGS += -fopenmp
+# ============================================================================
+# Version-specific build configurations
+# ============================================================================
 
-.PHONY: all clean prepare
+# Output target (all versions output to the same file)
+TARGET := build/zenann$(EXT_SUFFIX)
 
-all: prepare $(TARGET)
+# NAIVE: No parallelization (baseline)
+NAIVE_CXXFLAGS := $(BASE_CXXFLAGS)
+NAIVE_LDFLAGS := $(BASE_LDFLAGS)
+
+# OPENMP: Only OpenMP parallelization
+OPENMP_CXXFLAGS := $(BASE_CXXFLAGS) -fopenmp -DENABLE_OPENMP
+OPENMP_LDFLAGS := $(BASE_LDFLAGS) -fopenmp
+
+# SIMD: Only SIMD vectorization (AVX2)
+SIMD_CXXFLAGS := $(BASE_CXXFLAGS) -march=native -DENABLE_SIMD
+SIMD_LDFLAGS := $(BASE_LDFLAGS)
+
+# FULL: OpenMP + SIMD (fully optimized)
+FULL_CXXFLAGS := $(BASE_CXXFLAGS) -march=native -fopenmp -DENABLE_OPENMP -DENABLE_SIMD
+FULL_LDFLAGS := $(BASE_LDFLAGS) -fopenmp
+
+# CUDA: CUDA acceleration (placeholder for future)
+CUDA_CXXFLAGS := $(BASE_CXXFLAGS) -DENABLE_CUDA
+CUDA_LDFLAGS := $(BASE_LDFLAGS) -lcuda -lcudart
+
+# ============================================================================
+# Targets
+# ============================================================================
+
+.PHONY: all clean prepare naive openmp simd full cuda help
+
+# Default target: build full version
+all: full
 
 prepare:
-	mkdir -p build
+	@mkdir -p build
 
-# Build the Python extension, linking against our Faiss
-$(TARGET): $(SOURCES)
-	$(CXX) $(CXXFLAGS) $(ALL_INCLUDES) -shared -o $@ \
+# Build naive version (no parallelization)
+naive: prepare
+	$(CXX) $(NAIVE_CXXFLAGS) $(ALL_INCLUDES) -shared -o $(TARGET) \
 	    $(SOURCES) \
 	    -L$(FAISS_ROOT)/lib -lfaiss \
 	    $(ALL_LIBS) \
-	    $(LDFLAGS)
+	    $(NAIVE_LDFLAGS)
+	@echo "✓ Built NAIVE version: $(TARGET)"
 
+# Build OpenMP-only version
+openmp: prepare
+	$(CXX) $(OPENMP_CXXFLAGS) $(ALL_INCLUDES) -shared -o $(TARGET) \
+	    $(SOURCES) \
+	    -L$(FAISS_ROOT)/lib -lfaiss \
+	    $(ALL_LIBS) \
+	    $(OPENMP_LDFLAGS)
+	@echo "✓ Built OPENMP version: $(TARGET)"
+
+# Build SIMD-only version
+simd: prepare
+	$(CXX) $(SIMD_CXXFLAGS) $(ALL_INCLUDES) -shared -o $(TARGET) \
+	    $(SOURCES) \
+	    -L$(FAISS_ROOT)/lib -lfaiss \
+	    $(ALL_LIBS) \
+	    $(SIMD_LDFLAGS)
+	@echo "✓ Built SIMD version: $(TARGET)"
+
+# Build full version (OpenMP + SIMD)
+full: prepare
+	$(CXX) $(FULL_CXXFLAGS) $(ALL_INCLUDES) -shared -o $(TARGET) \
+	    $(SOURCES) \
+	    -L$(FAISS_ROOT)/lib -lfaiss \
+	    $(ALL_LIBS) \
+	    $(FULL_LDFLAGS)
+	@echo "✓ Built FULL version: $(TARGET)"
+
+# Build CUDA version (placeholder)
+cuda: prepare
+	@echo "CUDA version not yet implemented"
+	@echo "Will output to: $(TARGET)"
+
+# Clean all builds
 clean:
 	rm -rf build
+
+# Help message
+help:
+	@echo "ZenANN Build System - Multiple Optimization Versions"
+	@echo ""
+	@echo "Available targets:"
+	@echo "  make naive   - Build naive version (no parallelization)"
+	@echo "  make openmp  - Build OpenMP-only version"
+	@echo "  make simd    - Build SIMD-only version (AVX2)"
+	@echo "  make full    - Build fully optimized version (OpenMP + SIMD)"
+	@echo "  make cuda    - Build CUDA version (not yet implemented)"
+	@echo "  make all     - Build full version (default)"
+	@echo "  make clean   - Remove all built files"
+	@echo ""
+	@echo "Note: All versions output to build/zenann.so"
+	@echo "Each build will overwrite the previous one."
+	@echo ""
+	@echo "Usage:"
+	@echo "  import build.zenann as zenann    # Always works regardless of version"
