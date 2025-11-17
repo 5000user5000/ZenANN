@@ -9,6 +9,15 @@
 #include <cmath>
 #include <iostream>
 #include <fstream>
+#include <chrono>
+
+#ifdef ENABLE_PROFILING
+#define PROFILE_START(name) auto name##_start = std::chrono::high_resolution_clock::now();
+#define PROFILE_END(name, var) var = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - name##_start).count();
+#else
+#define PROFILE_START(name)
+#define PROFILE_END(name, var)
+#endif
 
 namespace zenann {
 
@@ -51,6 +60,7 @@ SearchResult IVFFlatIndex::search(const Vector& query, size_t k) const {
     std::vector<Pair> heap;
 
     // Calculate distance from query to all centroids
+    PROFILE_START(centroid_distance)
 #ifdef ENABLE_OPENMP
     #pragma omp parallel for schedule(static)
 #endif
@@ -58,17 +68,24 @@ SearchResult IVFFlatIndex::search(const Vector& query, size_t k) const {
         float d = l2_distance(query.data(), centroids_[c].data(), dimension_);
         cdist[c] = {d, c};
     }
+    double time_centroid_distance = 0;
+    PROFILE_END(centroid_distance, time_centroid_distance)
 
     // Select top-nprobe nearest centroids
+    PROFILE_START(centroid_selection)
     std::partial_sort(cdist.begin(), cdist.begin() + nprobe_, cdist.end(),
         [](auto& a, auto& b) {
             return a.first < b.first;
         }
     );
+    double time_centroid_selection = 0;
+    PROFILE_END(centroid_selection, time_centroid_selection)
 
     // Probe nprobe nearest lists
     heap.reserve(k);
     const auto& data = datastore_->getAll();
+
+    PROFILE_START(list_scanning)
 
 #ifdef ENABLE_OPENMP
     #pragma omp parallel for schedule(dynamic)
@@ -130,9 +147,24 @@ SearchResult IVFFlatIndex::search(const Vector& query, size_t k) const {
         }
 #endif
     }
+    double time_list_scanning = 0;
+    PROFILE_END(list_scanning, time_list_scanning)
 
+    PROFILE_START(final_sorting)
     std::sort(heap.begin(), heap.end(),
               [](const Pair& a, const Pair& b) { return a.first < b.first; });
+    double time_final_sorting = 0;
+    PROFILE_END(final_sorting, time_final_sorting)
+
+#ifdef ENABLE_PROFILING
+    // Output profiling data to stderr
+    std::cerr << "PROFILE: centroid_dist=" << time_centroid_distance
+              << "ms, centroid_select=" << time_centroid_selection
+              << "ms, list_scan=" << time_list_scanning
+              << "ms, final_sort=" << time_final_sorting
+              << "ms, total=" << (time_centroid_distance + time_centroid_selection + time_list_scanning + time_final_sorting)
+              << "ms" << std::endl;
+#endif
 
     SearchResult res;
     res.distances.resize(heap.size());

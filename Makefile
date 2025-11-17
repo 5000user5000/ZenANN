@@ -66,11 +66,15 @@ FULL_LDFLAGS := $(BASE_LDFLAGS) -fopenmp
 CUDA_CXXFLAGS := $(BASE_CXXFLAGS) -DENABLE_CUDA
 CUDA_LDFLAGS := $(BASE_LDFLAGS) -lcuda -lcudart
 
+# PROFILING: Full version with profiling enabled
+PROFILING_CXXFLAGS := $(BASE_CXXFLAGS) -march=native -fopenmp -DENABLE_OPENMP -DENABLE_SIMD -DENABLE_PROFILING
+PROFILING_LDFLAGS := $(BASE_LDFLAGS) -fopenmp
+
 # ============================================================================
 # Targets
 # ============================================================================
 
-.PHONY: all clean prepare naive openmp simd full cuda help
+.PHONY: all clean prepare naive openmp simd full cuda profiling help
 
 # Default target: build full version
 all: full
@@ -119,6 +123,15 @@ cuda: prepare
 	@echo "CUDA version not yet implemented"
 	@echo "Will output to: $(TARGET)"
 
+# Build profiling version (Full with profiling enabled)
+profiling: prepare
+	$(CXX) $(PROFILING_CXXFLAGS) $(ALL_INCLUDES) -shared -o $(TARGET) \
+	    $(SOURCES) \
+	    -L$(FAISS_ROOT)/lib -lfaiss \
+	    $(ALL_LIBS) \
+	    $(PROFILING_LDFLAGS)
+	@echo "✓ Built PROFILING version: $(TARGET)"
+
 # Clean all builds
 clean:
 	rm -rf build
@@ -131,9 +144,10 @@ help:
 	@echo "  make naive   - Build naive version (no parallelization)"
 	@echo "  make openmp  - Build OpenMP-only version"
 	@echo "  make simd    - Build SIMD-only version (AVX2)"
-	@echo "  make full    - Build fully optimized version (OpenMP + SIMD)"
-	@echo "  make cuda    - Build CUDA version (not yet implemented)"
-	@echo "  make all     - Build full version (default)"
+	@echo "  make full       - Build fully optimized version (OpenMP + SIMD)"
+	@echo "  make profiling  - Build profiling version (Full + detailed timing)"
+	@echo "  make cuda       - Build CUDA version (not yet implemented)"
+	@echo "  make all        - Build full version (default)"
 	@echo "  make clean   - Remove all built files"
 	@echo ""
 	@echo "Note: All versions output to build/zenann.so"
