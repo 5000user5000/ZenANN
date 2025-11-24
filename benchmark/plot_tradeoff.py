@@ -42,7 +42,14 @@ def plot_recall_qps_tradeoff(results_files, output_file='recall_qps_tradeoff.png
             # Extract data
             nprobes = [r['nprobe'] for r in results]
             qps_values = [r['qps_batch'] for r in results]
-            recall_values = [r[f'recall@{k}'] * 100 for r in results]
+
+            # Handle missing recall@k values
+            recall_key = f'recall@{k}'
+            if recall_key not in results[0]:
+                print(f"Warning: {recall_key} not found in {result_file}, skipping this file")
+                continue
+
+            recall_values = [r[recall_key] * 100 for r in results]
 
             # Create label
             dataset = metadata.get('dataset', 'unknown')
