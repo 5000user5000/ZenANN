@@ -1,5 +1,11 @@
 CXX := g++
+NVCC := nvcc
 BASE_CXXFLAGS := -std=c++17 -O3 -fPIC
+
+# CUDA configuration
+CUDA_PATH ?= /usr/local/cuda
+CUDA_ARCH := -arch=sm_60  # Adjust for your GPU (sm_60=Pascal, sm_75=Turing, sm_86=Ampere)
+NVCC_FLAGS := -O3 --compiler-options '-fPIC' $(CUDA_ARCH)
 
 # Python / pybind11 include flags
 PYBIND11_INCLUDES := $(shell python3 -m pybind11 --includes)
@@ -62,15 +68,20 @@ SIMD_LDFLAGS := $(BASE_LDFLAGS)
 FULL_CXXFLAGS := $(BASE_CXXFLAGS) -march=native -fopenmp -DENABLE_OPENMP -DENABLE_SIMD
 FULL_LDFLAGS := $(BASE_LDFLAGS) -fopenmp
 
-# CUDA: CUDA acceleration (placeholder for future)
+# CUDA: Pure CUDA acceleration (no OpenMP/SIMD to avoid conflicts)
 CUDA_CXXFLAGS := $(BASE_CXXFLAGS) -DENABLE_CUDA
-CUDA_LDFLAGS := $(BASE_LDFLAGS) -lcuda -lcudart
+CUDA_LDFLAGS := $(BASE_LDFLAGS) -L$(CUDA_PATH)/lib64 -lcudart
+CUDA_INCLUDES := $(ALL_INCLUDES) -I$(CUDA_PATH)/include
+
+# PROFILING: Full version with profiling enabled
+PROFILING_CXXFLAGS := $(BASE_CXXFLAGS) -march=native -fopenmp -DENABLE_OPENMP -DENABLE_SIMD -DENABLE_PROFILING
+PROFILING_LDFLAGS := $(BASE_LDFLAGS) -fopenmp
 
 # ============================================================================
 # Targets
 # ============================================================================
 
-.PHONY: all clean prepare naive openmp simd full cuda help
+.PHONY: all clean prepare naive openmp simd full cuda profiling help
 
 # Default target: build full version
 all: full
@@ -114,10 +125,35 @@ full: prepare
 	    $(FULL_LDFLAGS)
 	@echo "✓ Built FULL version: $(TARGET)"
 
-# Build CUDA version (placeholder)
+# Build CUDA version (Pure CUDA, no OpenMP/SIMD)
 cuda: prepare
-	@echo "CUDA version not yet implemented"
-	@echo "Will output to: $(TARGET)"
+	@echo "Building CUDA kernel..."
+	@$(NVCC) $(NVCC_FLAGS) -c src/CudaUtils.cu -o build/CudaUtils.o \
+	    $(PROJECT_INCLUDE) -I$(CUDA_PATH)/include
+	@echo "Building C++ sources with CUDA support..."
+	@$(CXX) $(CUDA_CXXFLAGS) $(CUDA_INCLUDES) -c src/IndexBase.cpp -o build/IndexBase.o
+	@$(CXX) $(CUDA_CXXFLAGS) $(CUDA_INCLUDES) -c src/IVFFlatIndex.cpp -o build/IVFFlatIndex.o
+	@$(CXX) $(CUDA_CXXFLAGS) $(CUDA_INCLUDES) -c src/KDTreeIndex.cpp -o build/KDTreeIndex.o
+	@$(CXX) $(CUDA_CXXFLAGS) $(CUDA_INCLUDES) -c src/HNSWIndex.cpp -o build/HNSWIndex.o
+	@$(CXX) $(CUDA_CXXFLAGS) $(CUDA_INCLUDES) -c python/zenann_pybind.cpp -o build/zenann_pybind.o
+	@echo "Linking with CUDA runtime..."
+	@$(CXX) -shared -o $(TARGET) \
+	    build/IndexBase.o build/IVFFlatIndex.o build/KDTreeIndex.o build/HNSWIndex.o \
+	    build/zenann_pybind.o build/CudaUtils.o \
+	    -L$(FAISS_ROOT)/lib -lfaiss \
+	    $(ALL_LIBS) \
+	    $(CUDA_LDFLAGS)
+	@echo "✓ Built CUDA version: $(TARGET)"
+	@echo "Note: This version uses pure CUDA (no OpenMP/SIMD)"
+
+# Build profiling version (Full with profiling enabled)
+profiling: prepare
+	$(CXX) $(PROFILING_CXXFLAGS) $(ALL_INCLUDES) -shared -o $(TARGET) \
+	    $(SOURCES) \
+	    -L$(FAISS_ROOT)/lib -lfaiss \
+	    $(ALL_LIBS) \
+	    $(PROFILING_LDFLAGS)
+	@echo "✓ Built PROFILING version: $(TARGET)"
 
 # Clean all builds
 clean:
@@ -131,9 +167,10 @@ help:
 	@echo "  make naive   - Build naive version (no parallelization)"
 	@echo "  make openmp  - Build OpenMP-only version"
 	@echo "  make simd    - Build SIMD-only version (AVX2)"
-	@echo "  make full    - Build fully optimized version (OpenMP + SIMD)"
-	@echo "  make cuda    - Build CUDA version (not yet implemented)"
-	@echo "  make all     - Build full version (default)"
+	@echo "  make full       - Build fully optimized version (OpenMP + SIMD)"
+	@echo "  make profiling  - Build profiling version (Full + detailed timing)"
+	@echo "  make cuda       - Build CUDA version (Pure GPU acceleration)"
+	@echo "  make all        - Build full version (default)"
 	@echo "  make clean   - Remove all built files"
 	@echo ""
 	@echo "Note: All versions output to build/zenann.so"

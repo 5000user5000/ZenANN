@@ -5,4 +5,7 @@
 /dist
 /zenann
 /build
+/index
 claude.md
+/.venv
+/benchmark_results

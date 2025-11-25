@@ -3,12 +3,24 @@
 #ifdef ENABLE_OPENMP
 #include <omp.h>
 #endif
+#ifdef ENABLE_CUDA
+#include "CudaUtils.h"
+#endif
 #include <limits>
 #include <random>
 #include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <fstream>
+#include <chrono>
+
+#ifdef ENABLE_PROFILING
+#define PROFILE_START(name) auto name##_start = std::chrono::high_resolution_clock::now();
+#define PROFILE_END(name, var) var = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - name##_start).count();
+#else
+#define PROFILE_START(name)
+#define PROFILE_END(name, var)
+#endif
 
 namespace zenann {
 
@@ -43,6 +55,29 @@ void IVFFlatIndex::train() {
         }
         lists_[best_c].push_back(id);
     }
+
+#ifdef ENABLE_CUDA
+    // Upload centroids to GPU
+    centroids_flat_.resize(nlist_ * dimension_);
+    for (size_t c = 0; c < nlist_; ++c) {
+        for (size_t d = 0; d < dimension_; ++d) {
+            centroids_flat_[c * dimension_ + d] = centroids_[c][d];
+        }
+    }
+    gpu_centroids_manager_.upload_centroids(centroids_flat_.data(), nlist_, dimension_);
+
+    // Upload base data to GPU
+    std::vector<float> data_flat(data.size() * dimension_);
+    for (size_t i = 0; i < data.size(); ++i) {
+        for (size_t d = 0; d < dimension_; ++d) {
+            data_flat[i * dimension_ + d] = data[i][d];
+        }
+    }
+    gpu_data_manager_.upload_data(data_flat.data(), data.size(), dimension_);
+
+    // Upload inverted lists to GPU
+    gpu_lists_manager_.upload_lists(lists_, nlist_);
+#endif
 }
 
 SearchResult IVFFlatIndex::search(const Vector& query, size_t k) const {
@@ -51,24 +86,62 @@ SearchResult IVFFlatIndex::search(const Vector& query, size_t k) const {
     std::vector<Pair> heap;
 
     // Calculate distance from query to all centroids
-#ifdef ENABLE_OPENMP
-    #pragma omp parallel for schedule(static)
-#endif
+    PROFILE_START(centroid_distance)
+
+#ifdef ENABLE_CUDA
+    // GPU version: Use batch API even for single query
+    std::vector<float> distances(nlist_);
+
+    if (gpu_centroids_manager_.is_ready()) {
+        cuda::batch_compute_centroid_distances(
+            query.data(),
+            gpu_centroids_manager_.get_device_ptr(),
+            distances.data(),
+            1,  // num_queries = 1
+            nlist_,
+            dimension_
+        );
+
+        // Store results with indices
+        for (size_t c = 0; c < nlist_; ++c) {
+            cdist[c] = {distances[c], c};
+        }
+    } else {
+        // Fallback to CPU if GPU not initialized
+        for (size_t c = 0; c < nlist_; ++c) {
+            float d = l2_distance(query.data(), centroids_[c].data(), dimension_);
+            cdist[c] = {d, c};
+        }
+    }
+#else
+    // CPU version: Compute distances with optional OpenMP
+    #ifdef ENABLE_OPENMP
+        #pragma omp parallel for schedule(static)
+    #endif
     for (size_t c = 0; c < nlist_; ++c) {
         float d = l2_distance(query.data(), centroids_[c].data(), dimension_);
         cdist[c] = {d, c};
     }
+#endif
+
+    double time_centroid_distance = 0;
+    PROFILE_END(centroid_distance, time_centroid_distance)
 
     // Select top-nprobe nearest centroids
+    PROFILE_START(centroid_selection)
     std::partial_sort(cdist.begin(), cdist.begin() + nprobe_, cdist.end(),
         [](auto& a, auto& b) {
             return a.first < b.first;
         }
     );
+    double time_centroid_selection = 0;
+    PROFILE_END(centroid_selection, time_centroid_selection)
 
     // Probe nprobe nearest lists
     heap.reserve(k);
     const auto& data = datastore_->getAll();
+
+    PROFILE_START(list_scanning)
 
 #ifdef ENABLE_OPENMP
     #pragma omp parallel for schedule(dynamic)
@@ -130,9 +203,24 @@ SearchResult IVFFlatIndex::search(const Vector& query, size_t k) const {
         }
 #endif
     }
+    double time_list_scanning = 0;
+    PROFILE_END(list_scanning, time_list_scanning)
 
+    PROFILE_START(final_sorting)
     std::sort(heap.begin(), heap.end(),
               [](const Pair& a, const Pair& b) { return a.first < b.first; });
+    double time_final_sorting = 0;
+    PROFILE_END(final_sorting, time_final_sorting)
+
+#ifdef ENABLE_PROFILING
+    // Output profiling data to stderr
+    std::cerr << "PROFILE: centroid_dist=" << time_centroid_distance
+              << "ms, centroid_select=" << time_centroid_selection
+              << "ms, list_scan=" << time_list_scanning
+              << "ms, final_sort=" << time_final_sorting
+              << "ms, total=" << (time_centroid_distance + time_centroid_selection + time_list_scanning + time_final_sorting)
+              << "ms" << std::endl;
+#endif
 
     SearchResult res;
     res.distances.resize(heap.size());
@@ -156,13 +244,79 @@ std::vector<SearchResult> IVFFlatIndex::search_batch(const Dataset& queries, siz
     const size_t nq = queries.size();
     std::vector<SearchResult> results(nq);
 
-    // Batch search with optional parallelization
-#ifdef ENABLE_OPENMP
-    #pragma omp parallel for schedule(dynamic)
-#endif
+#ifdef ENABLE_CUDA
+    if (gpu_centroids_manager_.is_ready() &&
+        gpu_data_manager_.is_ready() &&
+        gpu_lists_manager_.is_ready() &&
+        nq > 0) {
+        // OPTIMIZED: Complete GPU pipeline for 100K+ QPS
+        // All computation on GPU: centroid distances → select lists → scan lists
+
+        // Flatten queries
+        std::vector<float> queries_flat(nq * dimension_);
+        for (size_t i = 0; i < nq; ++i) {
+            for (size_t d = 0; d < dimension_; ++d) {
+                queries_flat[i * dimension_ + d] = queries[i][d];
+            }
+        }
+
+        // Allocate output buffers
+        std::vector<float> result_distances(nq * k);
+        std::vector<size_t> result_indices(nq * k);
+
+        // Call complete GPU pipeline V2 (4-kernel architecture from cuda.md)
+        cuda::batch_search_gpu_pipeline_v2(
+            queries_flat.data(),
+            gpu_centroids_manager_.get_device_ptr(),
+            gpu_data_manager_.get_device_ptr(),
+            gpu_lists_manager_.get_list_data_ptr(),
+            gpu_lists_manager_.get_list_offsets_ptr(),
+            result_distances.data(),
+            result_indices.data(),
+            nq,
+            nlist_,
+            nprobe_,
+            k,
+            dimension_
+        );
+
+        // Convert results to SearchResult format
+        for (size_t q = 0; q < nq; ++q) {
+            results[q].distances.resize(k);
+            results[q].indices.resize(k);
+
+            size_t valid_count = 0;
+            for (size_t i = 0; i < k; ++i) {
+                float dist = result_distances[q * k + i];
+                if (dist < INFINITY) {
+                    results[q].distances[valid_count] = dist;
+                    results[q].indices[valid_count] = result_indices[q * k + i];
+                    valid_count++;
+                }
+            }
+
+            // Resize to actual valid count
+            results[q].distances.resize(valid_count);
+            results[q].indices.resize(valid_count);
+        }
+    } else {
+        // Fallback: use individual search calls
+        #ifdef ENABLE_OPENMP
+            #pragma omp parallel for schedule(dynamic)
+        #endif
+        for (size_t i = 0; i < nq; ++i) {
+            results[i] = search(queries[i], k);
+        }
+    }
+#else
+    // CPU version: use individual search calls with optional parallelization
+    #ifdef ENABLE_OPENMP
+        #pragma omp parallel for schedule(dynamic)
+    #endif
     for (size_t i = 0; i < nq; ++i) {
         results[i] = search(queries[i], k);
     }
+#endif
 
     return results;
 }
@@ -299,6 +453,32 @@ std::shared_ptr<IVFFlatIndex> IVFFlatIndex::read_index(const std::string& filena
         lst.resize(sz);
         in.read(reinterpret_cast<char*>(lst.data()), sizeof(size_t)*sz);
     }
+
+#ifdef ENABLE_CUDA
+    // Upload data to GPU after loading from disk
+    const auto& loaded_data = idx->datastore_->getAll();
+
+    // Upload centroids
+    idx->centroids_flat_.resize(idx->nlist_ * idx->dimension_);
+    for (size_t c = 0; c < idx->nlist_; ++c) {
+        for (size_t d = 0; d < idx->dimension_; ++d) {
+            idx->centroids_flat_[c * idx->dimension_ + d] = idx->centroids_[c][d];
+        }
+    }
+    idx->gpu_centroids_manager_.upload_centroids(idx->centroids_flat_.data(), idx->nlist_, idx->dimension_);
+
+    // Upload base data
+    std::vector<float> data_flat(loaded_data.size() * idx->dimension_);
+    for (size_t i = 0; i < loaded_data.size(); ++i) {
+        for (size_t d = 0; d < idx->dimension_; ++d) {
+            data_flat[i * idx->dimension_ + d] = loaded_data[i][d];
+        }
+    }
+    idx->gpu_data_manager_.upload_data(data_flat.data(), loaded_data.size(), idx->dimension_);
+
+    // Upload inverted lists
+    idx->gpu_lists_manager_.upload_lists(idx->lists_, idx->nlist_);
+#endif
 
     return idx;
 }
