@@ -9,3 +9,4 @@
 claude.md
 /.venv
 /benchmark_results
+*.bin
