@@ -24,6 +24,7 @@ namespace cuda {
 
 constexpr int WARP_SIZE = 32;
 constexpr int MAX_K = 128;  // Maximum k we support efficiently
+constexpr int CANDIDATES_PER_THREAD = 16;  // adjustable 8, 16, 32
 
 /**
  * Pair structure for (distance, id) with device-side operators
@@ -232,8 +233,11 @@ __device__ inline void insert_to_local_topk(
 /**
  * Device function: Merge thread-local top-k into block-level top-k
  *
- * All threads write their results to shared memory, then thread 0
- * performs final selection to get block's top-k
+ * OPTIMIZED VERSION for large k (k=100+):
+ * - Each thread only contributes CANDIDATES_PER_THREAD candidates (not full k)
+ * - Reduces shared memory from O(block_size × k) to O(block_size × CANDIDATES_PER_THREAD)
+ * - For k=100, block_size=128, CANDIDATES_PER_THREAD=16:
+ *   Memory reduced from 102KB to 16KB!
  */
 __device__ void merge_block_topk(
     DistIdPair* local_topk,
@@ -245,21 +249,21 @@ __device__ void merge_block_topk(
     int block_size
 ) {
     // Write thread-local results to shared memory
-    // Each thread gets 'k' slots (not MAX_K) to save shared memory
-    int base = tid * k;
-    int write_count = min(local_size, k);
+    // Each thread gets 'CANDIDATES_PER_THREAD' slots (NOT k, NOT MAX_K)
+    int base = tid * CANDIDATES_PER_THREAD;  
+    int write_count = min(local_size, CANDIDATES_PER_THREAD);  
 
     for (int i = 0; i < write_count; ++i) {
         shared_candidates[base + i] = local_topk[i];
     }
-    for (int i = write_count; i < k; ++i) {
+    for (int i = write_count; i < CANDIDATES_PER_THREAD; ++i) {
         shared_candidates[base + i] = DistIdPair();  // INFINITY
     }
     __syncthreads();
 
     // Thread 0 performs merge
     if (tid == 0) {
-        int total_candidates = block_size * k;
+        int total_candidates = block_size * CANDIDATES_PER_THREAD;  
 
         // Simple k-pass selection (good for small k)
         for (int ki = 0; ki < k; ++ki) {
@@ -283,7 +287,6 @@ __device__ void merge_block_topk(
     }
     __syncthreads();
 }
-
 /**
  * Kernel C: Scan inverted lists and compute partial top-k
  *
@@ -662,8 +665,13 @@ void batch_search_gpu_pipeline_v2(
         // Shared memory: only for query vector + small merge buffer
         // We use thread-local top-k in registers (MAX_K per thread)
         // For merge, we only need k * block_size space, not MAX_K * block_size
-        size_t smem_size = dim * sizeof(float) +        // query vector
-                          k * block_size * sizeof(DistIdPair);  // merge buffer
+
+
+        // size_t smem_size = dim * sizeof(float) +        // query vector
+        //                   k * block_size * sizeof(DistIdPair);  // merge buffer
+        size_t smem_size = dim * sizeof(float) +           // query vector
+                  block_size * CANDIDATES_PER_THREAD * sizeof(DistIdPair);  // merge buffer
+
 
         // Check shared memory limit (typically 48KB)
         const size_t MAX_SMEM = 48 * 1024;
