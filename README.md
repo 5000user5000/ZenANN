@@ -344,6 +344,7 @@ ZenANN/
 │   ├── IVFFlatIndex.cpp
 │   ├── KDTreeIndex.cpp
 │   ├── HNSWIndex.cpp
+│   ├── CudaUtils_2.cu    # CUDA kernel optimization testing for k=1,10
 │   └── CudaUtils.cu     # CUDA kernel implementations
 ├── python/               # Python bindings (pybind11)
 ├── tests/                # Unit tests (pytest)
@@ -366,7 +367,7 @@ ZenANN/
 
 ## Engineering Infrastructure
 
-- **Build**: GNU Make
+- **Build**: GNU Make, CMake
 - **Testing**: pytest
 - **CI/CD**: GitHub Actions (tests full variant)
 - **Version Control**: Git
